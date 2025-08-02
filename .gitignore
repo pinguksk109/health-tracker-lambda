@@ -1,0 +1,46 @@
+# バイナリ（Lambdaデプロイ用など）
+bootstrap
+function.zip
+
+# ビルド成果物
+*.out
+*.exe
+*.test
+
+# Go modules
+/vendor/
+
+# OS / IDE固有
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# VSCode
+.vscode/
+*.code-workspace
+
+# Go workspace artifacts
+go.sum
+go.work
+go.work.sum
+
+# テストカバレッジ
+*.coverprofile
+*.cov
+
+# ログなど
+*.log
+
+# RIE（Runtime Interface Emulator）
+aws-lambda-rie
+
+# AWS認証情報など（例: 誤って含めないように）
+*.pem
+*.key
+*.crt
+*.enc
+*.json
+
+sample.json
+lambda-test/*
