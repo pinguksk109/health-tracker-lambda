@@ -44,3 +44,5 @@ aws-lambda-rie
 
 sample.json
 lambda-test/*
+
+.env
