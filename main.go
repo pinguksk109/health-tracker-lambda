@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
@@ -14,23 +13,25 @@ import (
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
+	"github.com/joho/godotenv"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/option"
 	"google.golang.org/api/sheets/v4"
 )
 
-// func handler(ctx context.Context, req events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
-// 	log.Printf("Received Body: %s", req.Body)
+type WebhookRequest struct {
+	Destination string `json:"destination"`
+	Events      []struct {
+		Type    string `json:"type"`
+		Message *struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"message"`
+		Timestamp int64 `json:"timestamp"`
+	} `json:"events"`
+}
 
-// 	return events.APIGatewayProxyResponse{
-// 		StatusCode:      200,
-// 		Headers:         map[string]string{"Content-Type": "text/plain"},
-// 		Body:            "OK",
-// 		IsBase64Encoded: false,
-// 	}, nil
-// }
-
-func handler(ctx context.Content, req events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+func handler(ctx context.Context, req events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
 	var wb WebhookRequest
 	if err := json.Unmarshal([]byte(req.Body), &wb); err != nil {
 		log.Printf("JSON parse error: %v", err)
@@ -40,32 +41,28 @@ func handler(ctx context.Content, req events.APIGatewayProxyRequest) (events.API
 		return events.APIGatewayProxyResponse{StatusCode: http.StatusOK}, nil
 	}
 
-	ev := wb.Event[0]
+	ev := wb.Events[0]
 	if ev.Type != "message" || ev.Message == nil || ev.Message.Type != "text" {
 		return events.APIGatewayProxyResponse{StatusCode: http.StatusOK}, nil
 	}
 
-	text := ev.Message.Text
-	parts := strings.Split(text, ",")
-	if len(parts) != 3 {
-		log.Printf("Invalid format: %q", text)
+	lines := strings.Split(strings.TrimSpace(ev.Message.Text), "\n")
+	if len(lines) != 2 {
+		log.Printf("Invalid format, expected two lines: %q", ev.Message.Text)
 		return events.APIGatewayProxyResponse{StatusCode: http.StatusOK}, nil
 	}
 
-	dt, err := time.Parse("2006-01-02", strings.TrimSpace(parts[0]))
-	if err != nil {
-		log.Printf("Date parse error (%q): %v", parts[0], err)
-	}
-	date := dt.Format("2006-01-02")
+	evtTime := time.Unix(ev.Timestamp/1000, 0)
+	date := evtTime.Format("2006-01-02")
 
-	weight, err := strconv.ParseFloat(strings.TrimSpace((parts[1]), 64))
+	weight, err := strconv.ParseFloat(strings.TrimSpace(lines[0]), 64)
 	if err != nil {
-		log.Printf("Weight parse error (%q): %v", parts[1], err)
+		log.Printf("Weight parse error (%q): %v", lines[0], err)
 		return events.APIGatewayProxyResponse{StatusCode: http.StatusOK}, nil
 	}
-	bodyFat, err := strconv.ParseFloat(strings.TrimSpace(parts[2]), err)
+	bodyFat, err := strconv.ParseFloat(strings.TrimSpace(lines[1]), 64)
 	if err != nil {
-		log.Printf("BodyFat parse error (%d): %v", parts[2], err)
+		log.Printf("BodyFat parse error (%q): %v", lines[1], err)
 		return events.APIGatewayProxyResponse{StatusCode: http.StatusOK}, nil
 	}
 
@@ -78,10 +75,19 @@ func handler(ctx context.Content, req events.APIGatewayProxyRequest) (events.API
 
 func appendToSheet(ctx context.Context, date string, weight, bodyFat float64) error {
 	credFile := os.Getenv("GOOGLE_CREDENTIALS_FILE")
-	b, _ := ioutil.ReadFile(credFile)
-	cfg, _ := google.JWTConfigFromJSON(b, sheets.SpreadsheetsScope)
+	b, err := os.ReadFile(credFile)
+	if err != nil {
+		return fmt.Errorf("cannot read credentials file: %w", err)
+	}
+	cfg, err := google.JWTConfigFromJSON(b, sheets.SpreadsheetsScope)
+	if err != nil {
+		return fmt.Errorf("parse credentials: %w", err)
+	}
 	client := cfg.Client(ctx)
-	srv, _ := sheets.NewService(ctx, option.WithHTTPClient(client))
+	srv, err := sheets.NewService(ctx, option.WithHTTPClient(client))
+	if err != nil {
+		return fmt.Errorf("create sheets service: %w", err)
+	}
 
 	ssID := os.Getenv("SPREADSHEET_ID")
 	if ssID == "" {
@@ -97,7 +103,7 @@ func appendToSheet(ctx context.Context, date string, weight, bodyFat float64) er
 			{date, weight, bodyFat},
 		},
 	}
-	_, err := srv.Spreadsheets.Values.Append(ssID, writeRange, vr).
+	_, err = srv.Spreadsheets.Values.Append(ssID, writeRange, vr).
 		ValueInputOption("USER_ENTERED").
 		InsertDataOption("INSERT_ROWS").
 		Do()
@@ -109,5 +115,6 @@ func appendToSheet(ctx context.Context, date string, weight, bodyFat float64) er
 }
 
 func main() {
+	_ = godotenv.Load(".env")
 	lambda.Start(handler)
 }
