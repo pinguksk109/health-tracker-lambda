@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -46,6 +47,19 @@ func handler(ctx context.Context, req events.APIGatewayProxyRequest) (events.API
 		return events.APIGatewayProxyResponse{StatusCode: http.StatusOK}, nil
 	}
 
+	// LineのWebhookは複数設定できないので、リクエストボディで分岐
+	if strings.TrimSpace(ev.Message.Text) == "get" {
+		data, err := getSheetData(ctx)
+		if err != nil {
+			log.Printf("Get sheet data failed: %v", err)
+			return events.APIGatewayProxyResponse{StatusCode: http.StatusInternalServerError}, nil
+		}
+		if err := sendLineMessage(strings.Join(data, "\n")); err != nil {
+			log.Printf("Send line message failed: %v", err)
+		}
+		return events.APIGatewayProxyResponse{StatusCode: http.StatusOK}, nil
+	}
+
 	lines := strings.Split(strings.TrimSpace(ev.Message.Text), "\n")
 	if len(lines) != 2 {
 		log.Printf("Invalid format, expected two lines: %q", ev.Message.Text)
@@ -74,28 +88,9 @@ func handler(ctx context.Context, req events.APIGatewayProxyRequest) (events.API
 }
 
 func appendToSheet(ctx context.Context, date string, weight, bodyFat float64) error {
-	credFile := os.Getenv("GOOGLE_CREDENTIALS_FILE")
-	b, err := os.ReadFile(credFile)
+	srv, ssID, writeRange, err := initSheetsService(ctx)
 	if err != nil {
-		return fmt.Errorf("cannot read credentials file: %w", err)
-	}
-	cfg, err := google.JWTConfigFromJSON(b, sheets.SpreadsheetsScope)
-	if err != nil {
-		return fmt.Errorf("parse credentials: %w", err)
-	}
-	client := cfg.Client(ctx)
-	srv, err := sheets.NewService(ctx, option.WithHTTPClient(client))
-	if err != nil {
-		return fmt.Errorf("create sheets service: %w", err)
-	}
-
-	ssID := os.Getenv("SPREADSHEET_ID")
-	if ssID == "" {
-		ssID = "YOUR_SPREADSHEET_ID"
-	}
-	writeRange := os.Getenv("SHEET_RANGE")
-	if writeRange == "" {
-		writeRange = "シート1!A:C"
+		return err
 	}
 
 	vr := &sheets.ValueRange{
@@ -103,6 +98,7 @@ func appendToSheet(ctx context.Context, date string, weight, bodyFat float64) er
 			{date, weight, bodyFat},
 		},
 	}
+
 	_, err = srv.Spreadsheets.Values.Append(ssID, writeRange, vr).
 		ValueInputOption("USER_ENTERED").
 		InsertDataOption("INSERT_ROWS").
@@ -111,6 +107,89 @@ func appendToSheet(ctx context.Context, date string, weight, bodyFat float64) er
 		return fmt.Errorf("sheets append: %w", err)
 	}
 	log.Printf("Appended: %s, %.2f, %.2f", date, weight, bodyFat)
+	return nil
+}
+
+func getSheetData(ctx context.Context) ([]string, error) {
+	srv, ssID, readRange, err := initSheetsService(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := srv.Spreadsheets.Values.Get(ssID, readRange).Do()
+	if err != nil {
+		return nil, fmt.Errorf("read sheet: %w", err)
+	}
+
+	var results []string
+	for _, row := range resp.Values {
+		if len(row) >= 3 {
+			results = append(results, fmt.Sprintf("%s: 体重=%s, 体脂肪率=%s", row[0], row[1], row[2]))
+		}
+	}
+
+	return results, nil
+}
+
+func initSheetsService(ctx context.Context) (*sheets.Service, string, string, error) {
+	credFile := os.Getenv("GOOGLE_CREDENTIALS_FILE")
+	b, err := os.ReadFile(credFile)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("cannot read credentials file: %w", err)
+	}
+	cfg, err := google.JWTConfigFromJSON(b, sheets.SpreadsheetsScope)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("parse credentials: %w", err)
+	}
+	client := cfg.Client(ctx)
+	srv, err := sheets.NewService(ctx, option.WithHTTPClient(client))
+	if err != nil {
+		return nil, "", "", fmt.Errorf("create sheets service: %w", err)
+	}
+
+	ssID := os.Getenv("SPREADSHEET_ID")
+	if ssID == "" {
+		return nil, "", "", fmt.Errorf("missing spreadsheet id")
+	}
+	readRange := os.Getenv("SHEET_RANGE")
+	if readRange == "" {
+		readRange = "シート1!A:C"
+	}
+
+	return srv, ssID, readRange, nil
+}
+
+func sendLineMessage(message string) error {
+	lineUserID := os.Getenv("LINE_USER_ID")
+	token := os.Getenv("LINE_BEARER_TOKEN")
+	if lineUserID == "" || token == "" {
+		return fmt.Errorf("LINE_USER_ID or LINE_BEARER_TOKEN missing")
+	}
+
+	payload := map[string]interface{}{
+		"to": lineUserID,
+		"messages": []map[string]string{
+			{"type": "text", "text": message},
+		},
+	}
+	body, _ := json.Marshal(payload)
+
+	req, err := http.NewRequest("POST", "https://api.line.me/v2/bot/message/push", bytes.NewBuffer(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("LINE API return %d", resp.StatusCode)
+	}
 	return nil
 }
 
