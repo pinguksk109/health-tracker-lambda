@@ -1,0 +1,53 @@
+name: Notify GitHub Activities to LINE (Messaging API)
+
+on:
+  workflow_dispatch:
+  push:
+  pull_request:
+    types: [opened, reopened, closed, ready_for_review, review_requested]
+  issues:
+    types: [opened, reopened, closed, assigned, labeled]
+  issue_comment:
+    types: [created]
+  release:
+    types: [published]
+  watch:
+    types: [started]  # Star
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build message
+        id: msg
+        run: |
+          URL="${{ github.event.pull_request.html_url || github.event.issue.html_url || github.event.release.html_url || format('https://github.com/{0}', github.repository) }}"
+          TITLE="${{ github.event.pull_request.title || github.event.issue.title || github.event.release.name || github.ref_name }}"
+          ACTOR="${{ github.actor }}"
+          EV="${{ github.event_name }}"
+          REPO="${{ github.repository }}"
+          BRANCH="${{ github.ref_name }}"
+          COMMIT_MSG="${{ github.event.head_commit.message || '' }}"
+          TEXT="[${EV}] ${REPO}\n${TITLE}\nbranch: ${BRANCH}\nby ${ACTOR}\n${URL}"
+          if [ "${EV}" = "push" ] && [ -n "${COMMIT_MSG}" ]; then
+            TEXT="${TEXT}\nmsg: ${COMMIT_MSG%%$'\n'*}"
+          fi
+          echo "text=${TEXT}" >> $GITHUB_OUTPUT
+
+      - name: Push text to LINE (Messaging API)
+        env:
+          ACCESS_TOKEN: ${{ secrets.LINE_BEARER_TOKEN }}
+          TO: ${{ secrets.LINE_USER_ID }}
+          TEXT: ${{ steps.msg.outputs.text }}
+        run: |
+          # 単純なテキストメッセージをPush
+          jq -n --arg to "$TO" --arg text "$TEXT" \
+            '{to:$to, messages:[{type:"text", text:$text}]}' > body.json
+
+          echo "Request body:"
+          cat body.json
+
+          curl -sS -w "\n%{http_code}\n" -X POST https://api.line.me/v2/bot/message/push \
+            -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d @body.json
