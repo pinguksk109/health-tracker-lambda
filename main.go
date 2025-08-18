@@ -60,10 +60,15 @@ func handler(ctx context.Context, req events.APIGatewayProxyRequest) (events.API
 		return events.APIGatewayProxyResponse{StatusCode: http.StatusOK}, nil
 	}
 
-	lines := strings.Split(strings.TrimSpace(ev.Message.Text), "\n")
-	if len(lines) != 2 {
-		log.Printf("Invalid format, expected two lines: %q", ev.Message.Text)
-		return events.APIGatewayProxyResponse{StatusCode: http.StatusOK}, nil
+	lines := splitNonEmptyLines(ev.Message.Text)
+	if len(lines) == 0 {
+		log.Printf("Empty Message")
+		return events.APIGatewayProxyResponse{StatusCode: http.StatusBadRequest}, nil
+	}
+
+	if len(lines) > 4 {
+		log.Printf("Invalid format (too many lines): %q", ev.Message.Text)
+		return events.APIGatewayProxyResponse{StatusCode: http.StatusBadRequest}, nil
 	}
 
 	evtTime := time.Unix(ev.Timestamp/1000, 0)
@@ -74,29 +79,44 @@ func handler(ctx context.Context, req events.APIGatewayProxyRequest) (events.API
 		log.Printf("Weight parse error (%q): %v", lines[0], err)
 		return events.APIGatewayProxyResponse{StatusCode: http.StatusOK}, nil
 	}
-	bodyFat, err := strconv.ParseFloat(strings.TrimSpace(lines[1]), 64)
-	if err != nil {
-		log.Printf("BodyFat parse error (%q): %v", lines[1], err)
-		return events.APIGatewayProxyResponse{StatusCode: http.StatusOK}, nil
+
+	var bodyFat, bodyWater, bodyMuscle *float64
+	if len(lines) >= 2 {
+		if v, ok := parseOptinalFloat(lines[1]); ok {
+			bodyFat = &v
+		}
+	}
+	if len(lines) >= 3 {
+		if v, ok := parseOptinalFloat(lines[2]); ok {
+			bodyWater = &v
+		}
+	}
+	if len(lines) >= 4 {
+		if v, ok := parseOptinalFloat(lines[3]); ok {
+			bodyMuscle = &v
+		}
 	}
 
-	if err := appendToSheet(ctx, date, weight, bodyFat); err != nil {
+	if err := appendToSheet(ctx, date, weight, bodyFat, bodyWater, bodyMuscle); err != nil {
 		log.Printf("Append failed: %v", err)
 	}
 
 	return events.APIGatewayProxyResponse{StatusCode: http.StatusOK, Body: "OK"}, nil
 }
 
-func appendToSheet(ctx context.Context, date string, weight, bodyFat float64) error {
+func appendToSheet(ctx context.Context, date string, weight float64, bodyFat, bodyWater, bodyMuscle *float64) error {
 	srv, ssID, writeRange, err := initSheetsService(ctx)
 	if err != nil {
 		return err
 	}
 
+	row := []interface{}{date, weight}
+	row = append(row, optCell(bodyFat))
+	row = append(row, optCell(bodyWater))
+	row = append(row, optCell(bodyMuscle))
+
 	vr := &sheets.ValueRange{
-		Values: [][]interface{}{
-			{date, weight, bodyFat},
-		},
+		Values: [][]interface{}{row},
 	}
 
 	_, err = srv.Spreadsheets.Values.Append(ssID, writeRange, vr).
@@ -106,8 +126,16 @@ func appendToSheet(ctx context.Context, date string, weight, bodyFat float64) er
 	if err != nil {
 		return fmt.Errorf("sheets append: %w", err)
 	}
-	log.Printf("Appended: %s, %.2f, %.2f", date, weight, bodyFat)
+	log.Printf("Appended: %s, weight=%.2f, body_fat=%v, body_water=%v, body_muscle=%v",
+		date, weight, bodyFat, bodyWater, bodyMuscle)
 	return nil
+}
+
+func optCell(p *float64) interface{} {
+	if p == nil {
+		return ""
+	}
+	return *p
 }
 
 func getSheetData(ctx context.Context) ([]string, error) {
@@ -123,11 +151,23 @@ func getSheetData(ctx context.Context) ([]string, error) {
 
 	var results []string
 	for _, row := range resp.Values {
-		if len(row) >= 3 {
-			results = append(results, fmt.Sprintf("%s: 体重=%s, 体脂肪率=%s", row[0], row[1], row[2]))
+		c := func(i int) string {
+			if i < len(row) {
+				if s, ok := row[i].(string); ok {
+					if strings.TrimSpace(s) == "" {
+						return "-"
+					}
+					return s
+				}
+				return fmt.Sprint(row[i])
+			}
+			return "-"
+		}
+		if len(row) >= 2 {
+			results = append(results, fmt.Sprintf("%s: 体重=%s, 体脂肪率=%s, 体水分=%s, 筋肉量=%s",
+				c(0), c(1), c(2), c(3), c(4)))
 		}
 	}
-
 	return results, nil
 }
 
@@ -153,10 +193,35 @@ func initSheetsService(ctx context.Context) (*sheets.Service, string, string, er
 	}
 	readRange := os.Getenv("SHEET_RANGE")
 	if readRange == "" {
-		readRange = "シート1!A:C"
+		readRange = "シート1!A:E"
 	}
 
 	return srv, ssID, readRange, nil
+}
+
+func splitNonEmptyLines(s string) []string {
+	raw := strings.Split(strings.TrimSpace(s), "\n")
+	out := make([]string, 0, len(raw))
+	for _, r := range raw {
+		t := strings.TrimSpace(r)
+		if t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+func parseOptinalFloat(s string) (float64, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, false
+	}
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		log.Printf("Optinal value parse error (%q): %v", s, err)
+		return 0, false
+	}
+	return v, true
 }
 
 func sendLineMessage(message string) error {
