@@ -72,7 +72,8 @@ func handler(ctx context.Context, req events.APIGatewayProxyRequest) (events.API
 	}
 
 	evtTime := time.Unix(ev.Timestamp/1000, 0)
-	date := evtTime.Format("2006-01-02")
+	jst, _ := time.LoadLocation("Asia/Tokyo")
+	date := evtTime.In(jst).Format("2006-01-02")
 
 	weight, err := strconv.ParseFloat(strings.TrimSpace(lines[0]), 64)
 	if err != nil {
